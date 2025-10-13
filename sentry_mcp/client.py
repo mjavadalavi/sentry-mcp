@@ -2,8 +2,14 @@
 
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import List, Dict, Any, Optional
 import statistics
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class SentryClient:
@@ -31,6 +37,17 @@ class SentryClient:
             "Content-Type": "application/json",
         }
 
+        # Create session with retry strategy
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
     def get_transactions(
         self, period: str = "24h", limit: int = 500, sort: str = "-transaction.duration"
     ) -> List[Dict[str, Any]]:
@@ -45,7 +62,7 @@ class SentryClient:
         }
 
         try:
-            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response = self.session.get(url, headers=self.headers, params=params, timeout=30, verify=False)
             response.raise_for_status()
             data = response.json()
             return data.get("data", [])
@@ -57,7 +74,7 @@ class SentryClient:
         url = f"{self.base_url}/api/0/projects/{self.org}/{self.project_slug}/events/{event_id}/"
 
         try:
-            response = requests.get(url, headers=self.headers, timeout=30)
+            response = self.session.get(url, headers=self.headers, timeout=30, verify=False)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -71,7 +88,7 @@ class SentryClient:
         params = {"statsPeriod": period, "query": query, "per_page": limit}
 
         try:
-            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response = self.session.get(url, headers=self.headers, params=params, timeout=30, verify=False)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
