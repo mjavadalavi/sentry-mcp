@@ -127,6 +127,40 @@ async def list_tools() -> list[Tool]:
                 "required": ["route"],
             },
         ),
+        Tool(
+            name="get_route_detailed_traces",
+            description=(
+                "Get detailed traces with all spans for a specific route. "
+                "This shows you EXACTLY where time is spent in slow requests, "
+                "including database queries, external API calls, and other operations. "
+                "Perfect for identifying performance bottlenecks."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "route": {
+                        "type": "string",
+                        "description": "Route pattern (e.g., '/api/v1/sites/{site_id}/products')",
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Time period (default: '24h')",
+                        "default": "24h",
+                    },
+                    "threshold_ms": {
+                        "type": "integer",
+                        "description": "Minimum duration in milliseconds to analyze (default: 2000)",
+                        "default": 2000,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of traces to analyze (default: 5)",
+                        "default": 5,
+                    },
+                },
+                "required": ["route"],
+            },
+        ),
     ]
 
 
@@ -283,8 +317,66 @@ Period: {period}
 - Throughput (TPM): {route_data['tpm']} requests/min
 - Failure Rate: {route_data['failure_rate']}%
 
-💡 Use analyze_transaction_trace to see detailed breakdown of specific events.
+💡 Use get_route_detailed_traces to see detailed breakdown of specific events with all spans.
 """
+
+            return [TextContent(type="text", text=output)]
+
+        elif name == "get_route_detailed_traces":
+            route = arguments.get("route")
+            period = arguments.get("period", "24h")
+            threshold_ms = arguments.get("threshold_ms", 2000)
+            limit = arguments.get("limit", 5)
+
+            if not route:
+                return [TextContent(type="text", text="❌ Error: route is required")]
+
+            result = client.get_route_detailed_traces(
+                route=route, period=period, threshold_ms=threshold_ms, limit=limit
+            )
+
+            if "error" in result:
+                return [TextContent(type="text", text=f"❌ Error: {result['error']}")]
+
+            output = f"""🔍 Detailed Trace Analysis for Route
+
+📋 Route: {result['route']}
+⏱️  Period: {result['period']}
+🎯 Threshold: >{result['threshold_ms']}ms
+📊 Total Events: {result['total_events']}
+🐌 Slow Events: {result['slow_events_count']}
+🔎 Traces Analyzed: {result['traces_analyzed']}
+
+"""
+
+            if not result['traces']:
+                output += result.get('message', 'No slow traces found.')
+                return [TextContent(type="text", text=output)]
+
+            # Display each trace
+            for i, trace in enumerate(result['traces'], 1):
+                output += f"""
+{'='*70}
+🔥 Trace #{i}
+{'='*70}
+Event ID: {trace['event_id']}
+Total Duration: {trace['total_duration_ms']:.0f}ms
+Timestamp: {trace['timestamp']}
+Spans Count: {trace['spans_count']}
+
+⚡ Top Slowest Operations:
+
+"""
+                for j, span in enumerate(trace['spans'][:10], 1):
+                    desc = span['description'][:100]
+                    output += f"""{j}. [{span['op']}] {desc}
+   Duration: {span['duration_ms']:.2f}ms
+   Tags: {span.get('tags', {})}
+
+"""
+
+            output += f"\n{'='*70}\n"
+            output += "💡 Focus on the slowest spans to optimize your code!\n"
 
             return [TextContent(type="text", text=output)]
 

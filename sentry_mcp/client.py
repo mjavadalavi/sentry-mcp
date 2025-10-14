@@ -100,14 +100,33 @@ class SentryClient:
 
     def get_event_details(self, event_id: str) -> Dict[str, Any]:
         """Get detailed information about a specific event including spans"""
-        url = f"{self.base_url}/api/0/projects/{self.org}/{self.project_slug}/events/{event_id}/"
+        # Try organization-level endpoint first (better for transactions)
+        url = f"{self.base_url}/api/0/organizations/{self.org}/events/{self.project_slug}:{event_id}/"
 
         try:
+            logger.info(f"Fetching event details from: {url}")
             response = self.session.get(url, headers=self.headers, timeout=30, verify=False)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            logger.debug(f"Event data keys: {list(data.keys())}")
+            logger.debug(f"Event type: {data.get('type')}")
+            logger.debug(f"Spans count in response: {len(data.get('spans', []))}")
+            logger.debug(f"Entries count: {len(data.get('entries', []))}")
+            return data
         except requests.exceptions.RequestException as e:
-            raise Exception(f"Failed to fetch event details: {e}")
+            logger.error(f"Failed to fetch event details: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text[:500]}")
+            # Fallback to project-level endpoint
+            try:
+                url = f"{self.base_url}/api/0/projects/{self.org}/{self.project_slug}/events/{event_id}/"
+                logger.info(f"Trying fallback URL: {url}")
+                response = self.session.get(url, headers=self.headers, timeout=30, verify=False)
+                response.raise_for_status()
+                return response.json()
+            except:
+                raise Exception(f"Failed to fetch event details: {e}")
 
     def get_issues(
         self, period: str = "24h", limit: int = 100, query: str = ""
@@ -191,6 +210,89 @@ class SentryClient:
             "slow_routes": slow_routes,
         }
 
+    def get_transaction_events(
+        self, transaction_name: str, period: str = "24h", limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get actual event IDs for a specific transaction"""
+        url = f"{self.base_url}/api/0/organizations/{self.org}/events/"
+        params = {
+            "statsPeriod": period,
+            "project": self.project_id,
+            "query": f'event.type:transaction transaction:"{transaction_name}"',
+            "sort": "-transaction.duration",  # Sort by duration descending
+            "per_page": limit,
+            "field": [
+                "id",
+                "timestamp",
+                "transaction",
+                "transaction.duration",
+                "transaction.op",
+                "http.method",
+            ],
+        }
+
+        try:
+            logger.info(f"Fetching events for transaction: {transaction_name}")
+            response = self.session.get(url, headers=self.headers, params=params, timeout=30, verify=False)
+            response.raise_for_status()
+            data = response.json()
+            events = data.get("data", [])
+            logger.info(f"Found {len(events)} events")
+            return events
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch transaction events: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response text: {e.response.text}")
+            return []
+
+    def get_route_detailed_traces(
+        self, route: str, period: str = "24h", threshold_ms: int = 2000, limit: int = 5
+    ) -> Dict[str, Any]:
+        """Get detailed traces for a specific route including all spans"""
+        # First get event IDs for this route
+        events = self.get_transaction_events(route, period=period, limit=limit)
+
+        if not events:
+            return {"error": f"No events found for route: {route}"}
+
+        # Filter events by threshold
+        slow_events = [
+            e for e in events
+            if (e.get("transaction.duration") or 0) * 1000 >= threshold_ms
+        ]
+
+        if not slow_events:
+            return {
+                "route": route,
+                "message": f"No events slower than {threshold_ms}ms found",
+                "total_events": len(events),
+                "traces": []
+            }
+
+        # Get detailed trace for each event
+        traces = []
+        for event in slow_events[:limit]:
+            event_id = event.get("id")
+            if not event_id:
+                continue
+
+            try:
+                trace = self.get_transaction_trace(event_id)
+                traces.append(trace)
+            except Exception as e:
+                logger.error(f"Failed to get trace for event {event_id}: {e}")
+                continue
+
+        return {
+            "route": route,
+            "period": period,
+            "threshold_ms": threshold_ms,
+            "total_events": len(events),
+            "slow_events_count": len(slow_events),
+            "traces_analyzed": len(traces),
+            "traces": traces
+        }
+
     def get_transaction_trace(self, event_id: str) -> Dict[str, Any]:
         """Get detailed trace information for a transaction"""
         event = self.get_event_details(event_id)
@@ -198,10 +300,14 @@ class SentryClient:
         if not event:
             return {"error": "Event not found"}
 
-        # Extract spans
-        spans = event.get("spans", [])
-        analyzed_spans = []
+        # Extract spans from entries (Sentry stores spans in entries, not root level)
+        spans = []
+        for entry in event.get("entries", []):
+            if entry.get("type") == "spans":
+                spans = entry.get("data", [])
+                break
 
+        analyzed_spans = []
         for span in spans:
             start = span.get("start_timestamp", 0)
             end = span.get("timestamp", 0)
@@ -213,20 +319,25 @@ class SentryClient:
                     "description": span.get("description", "N/A"),
                     "duration_ms": round(duration_ms, 2),
                     "tags": span.get("tags", {}),
+                    "data": span.get("data", {}),
                 }
             )
 
         # Sort by duration
         analyzed_spans.sort(key=lambda x: x["duration_ms"], reverse=True)
 
+        # Calculate total duration from startTimestamp and endTimestamp
+        start_ts = event.get("startTimestamp")
+        end_ts = event.get("endTimestamp")
+        total_duration_ms = 0
+        if start_ts and end_ts:
+            total_duration_ms = (end_ts - start_ts) * 1000
+
         return {
             "event_id": event_id,
-            "transaction": event.get("transaction"),
-            "total_duration_ms": event.get("contexts", {})
-            .get("trace", {})
-            .get("duration", 0)
-            * 1000,
-            "timestamp": event.get("timestamp"),
+            "transaction": event.get("title") or event.get("transaction") or "Unknown",
+            "total_duration_ms": total_duration_ms,
+            "timestamp": event.get("dateReceived"),
             "spans_count": len(analyzed_spans),
             "spans": analyzed_spans[:20],  # Top 20 slowest spans
         }
