@@ -5,8 +5,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from typing import List, Dict, Any, Optional
-import statistics
 import urllib3
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -49,7 +53,7 @@ class SentryClient:
         self.session.mount("https://", adapter)
 
     def get_transactions(
-        self, period: str = "24h", limit: int = 500, sort: str = "-transaction.duration"
+        self, period: str = "24h", limit: int = 50, sort: str = "-tpm"
     ) -> List[Dict[str, Any]]:
         """Get all transactions from Sentry"""
         url = f"{self.base_url}/api/0/organizations/{self.org}/events/"
@@ -57,16 +61,41 @@ class SentryClient:
             "statsPeriod": period,
             "project": self.project_id,
             "query": "event.type:transaction",
-            "sort": sort,
+            "sort": ["-team_key_transaction", sort],
             "per_page": limit,
+            "field": [
+                "team_key_transaction",
+                "transaction",
+                "project",
+                "transaction.op",
+                "http.method",
+                "tpm()",
+                "p50()",
+                "p95()",
+                "failure_rate()",
+                "apdex()",
+                "count_unique(user)",
+                "count_miserable(user)",
+                "user_misery()",
+            ],
+            "referrer": "api.performance.landing-table",
         }
 
         try:
+            logger.info(f"Fetching transactions: {url}")
+            logger.debug(f"Params: {params}")
             response = self.session.get(url, headers=self.headers, params=params, timeout=30, verify=False)
             response.raise_for_status()
             data = response.json()
-            return data.get("data", [])
+            transactions = data.get("data", [])
+            logger.info(f"Fetched {len(transactions)} transactions")
+            if transactions:
+                logger.debug(f"Sample transaction: {transactions[0]}")
+            return transactions
         except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch transactions: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response text: {e.response.text}")
             raise Exception(f"Failed to fetch transactions: {e}")
 
     def get_event_details(self, event_id: str) -> Dict[str, Any]:
@@ -98,53 +127,60 @@ class SentryClient:
         self, threshold_ms: int = 2000, period: str = "24h"
     ) -> Dict[str, Any]:
         """Analyze and group slow transactions by route"""
+        logger.info(f"Analyzing slow transactions with threshold={threshold_ms}ms, period={period}")
         transactions = self.get_transactions(period=period)
 
         if not transactions:
+            logger.warning("No transactions found")
             return {"error": "No transactions found"}
 
+        logger.info(f"Analyzing {len(transactions)} transactions")
+        
         # Group by route
         routes = {}
         for trans in transactions:
             route = trans.get("transaction", "unknown")
-            duration = trans.get("transaction.duration", 0)
-
+            
+            # Log first transaction to debug
+            if len(routes) == 0:
+                logger.debug(f"First transaction data: {trans}")
+            
+            # p95() is already in milliseconds from Sentry API
+            p95_duration = trans.get("p95()", 0) or 0
+            p50_duration = trans.get("p50()", 0) or 0
+            tpm = trans.get("tpm()", 0) or 0
+            failure_rate = trans.get("failure_rate()", 0) or 0
+            
             if route not in routes:
-                routes[route] = []
-
-            routes[route].append(
-                {
-                    "duration": duration,
-                    "timestamp": trans.get("timestamp"),
-                    "id": trans.get("id"),
-                }
-            )
-
-        # Calculate stats for each route
+                routes[route] = {
+                    "transaction": route,
+                    "p95_ms": p95_duration,
+                    "p50_ms": p50_duration,
+                    "tpm": tpm,
+                    "failure_rate": failure_rate,
+                    "http_method": trans.get("http.method", "N/A"),
+                    "transaction_op": trans.get("transaction.op", "N/A"),
+                }        # Filter slow routes based on p95 threshold
         slow_routes = []
         for route, data in routes.items():
-            durations = [d["duration"] for d in data]
-            avg_duration = statistics.mean(durations)
-
-            if avg_duration > threshold_ms or max(durations) > threshold_ms * 2:
+            p95_ms = data["p95_ms"]
+            
+            if p95_ms > threshold_ms:
                 stats = {
                     "route": route,
-                    "count": len(durations),
-                    "avg_ms": round(avg_duration, 2),
-                    "min_ms": round(min(durations), 2),
-                    "max_ms": round(max(durations), 2),
-                    "median_ms": round(statistics.median(durations), 2),
-                    "p95_ms": (
-                        round(statistics.quantiles(durations, n=20)[18], 2)
-                        if len(durations) > 1
-                        else round(durations[0], 2)
-                    ),
-                    "slowest_event_id": max(data, key=lambda x: x["duration"])["id"],
+                    "p95_ms": round(p95_ms, 2),
+                    "p50_ms": round(data["p50_ms"], 2),
+                    "tpm": round(data["tpm"], 2),
+                    "failure_rate": round(data["failure_rate"] * 100, 2),  # Convert to percentage
+                    "http_method": data["http_method"],
+                    "transaction_op": data["transaction_op"],
                 }
                 slow_routes.append(stats)
 
-        # Sort by average duration
-        slow_routes.sort(key=lambda x: x["avg_ms"], reverse=True)
+        # Sort by p95 duration
+        slow_routes.sort(key=lambda x: x["p95_ms"], reverse=True)
+        
+        logger.info(f"Found {len(slow_routes)} slow routes out of {len(routes)} total routes")
 
         return {
             "total_transactions": len(transactions),

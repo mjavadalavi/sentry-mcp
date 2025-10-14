@@ -156,13 +156,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 for i, route_data in enumerate(result["slow_routes"][:10], 1):
                     output += f"""{i}. {route_data['route']}
    📈 Stats:
-      Count: {route_data['count']} requests
-      Average: {route_data['avg_ms']}ms
-      Min: {route_data['min_ms']}ms
-      Max: {route_data['max_ms']}ms
-      Median: {route_data['median_ms']}ms
+      Method: {route_data['http_method']} | Operation: {route_data['transaction_op']}
+      P50: {route_data['p50_ms']}ms
       P95: {route_data['p95_ms']}ms
-   🔍 Slowest Event ID: {route_data['slowest_event_id']}
+      TPM (Throughput): {route_data['tpm']} requests/min
+      Failure Rate: {route_data['failure_rate']}%
 
 """
             else:
@@ -215,8 +213,9 @@ Total Routes: {result['total_routes']}
 """
             for i, route_data in enumerate(result["slow_routes"], 1):
                 output += f"""{i}. {route_data['route']}
-   Avg: {route_data['avg_ms']}ms | P95: {route_data['p95_ms']}ms | Max: {route_data['max_ms']}ms
-   Requests: {route_data['count']}
+   Method: {route_data['http_method']} | Operation: {route_data['transaction_op']}
+   P50: {route_data['p50_ms']}ms | P95: {route_data['p95_ms']}ms
+   TPM: {route_data['tpm']} requests/min | Failure Rate: {route_data['failure_rate']}%
 
 """
 
@@ -277,16 +276,14 @@ Route: {route}
 Period: {period}
 
 📈 Statistics:
-- Total Requests: {route_data['count']}
-- Average Duration: {route_data['avg_ms']}ms
-- Minimum Duration: {route_data['min_ms']}ms
-- Maximum Duration: {route_data['max_ms']}ms
-- Median Duration: {route_data['median_ms']}ms
+- HTTP Method: {route_data['http_method']}
+- Transaction Operation: {route_data['transaction_op']}
+- P50 Duration: {route_data['p50_ms']}ms
 - P95 Duration: {route_data['p95_ms']}ms
+- Throughput (TPM): {route_data['tpm']} requests/min
+- Failure Rate: {route_data['failure_rate']}%
 
-🔍 Slowest Event ID: {route_data['slowest_event_id']}
-
-💡 Use analyze_transaction_trace with this event ID to see detailed breakdown.
+💡 Use analyze_transaction_trace to see detailed breakdown of specific events.
 """
 
             return [TextContent(type="text", text=output)]
