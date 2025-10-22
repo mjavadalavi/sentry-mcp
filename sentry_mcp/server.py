@@ -87,7 +87,8 @@ async def list_tools() -> list[Tool]:
             name="get_recent_issues",
             description=(
                 "Get recent errors and exceptions from Sentry. "
-                "Useful for identifying bugs and production issues."
+                "Useful for identifying bugs and production issues. "
+                "By default, filters for unresolved issues with high or medium priority."
             ),
             inputSchema={
                 "type": "object",
@@ -102,7 +103,30 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of issues to return (default: 50)",
                         "default": 50,
                     },
+                    "query": {
+                        "type": "string",
+                        "description": "Sentry query filter (default: 'is:unresolved issue.priority:[high, medium]')",
+                        "default": "is:unresolved issue.priority:[high, medium]",
+                    },
                 },
+            },
+        ),
+        Tool(
+            name="get_issue_details",
+            description=(
+                "Get detailed information about a specific issue including stack traces, "
+                "breadcrumbs, tags, and the latest event data. "
+                "Requires an issue_id from get_recent_issues."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_id": {
+                        "type": "string",
+                        "description": "Sentry issue ID to analyze",
+                    }
+                },
+                "required": ["issue_id"],
             },
         ),
         Tool(
@@ -258,20 +282,24 @@ Total Routes: {result['total_routes']}
         elif name == "get_recent_issues":
             period = arguments.get("period", "24h")
             limit = arguments.get("limit", 50)
+            query = arguments.get("query", "is:unresolved issue.priority:[high, medium]")
 
-            issues = client.get_issues(period=period, limit=limit)
+            issues = client.get_issues(period=period, limit=limit, query=query)
 
             if not issues:
                 return [TextContent(type="text", text="✅ No issues found!")]
 
             output = f"""🐛 Recent Issues ({period})
 
+Query: {query}
 Total Issues: {len(issues)}
 
 """
             for i, issue in enumerate(issues[:20], 1):
+                priority = issue.get('priority', 'unknown')
                 output += f"""{i}. {issue.get('title', 'Unknown')}
-   Level: {issue.get('level', 'unknown')}
+   ID: {issue.get('id', 'N/A')}
+   Priority: {priority} | Level: {issue.get('level', 'unknown')}
    Count: {issue.get('count', 0)} events
    First Seen: {issue.get('firstSeen', 'N/A')}
    Last Seen: {issue.get('lastSeen', 'N/A')}
@@ -280,6 +308,114 @@ Total Issues: {len(issues)}
 """
 
             return [TextContent(type="text", text=output)]
+
+        elif name == "get_issue_details":
+            issue_id = arguments.get("issue_id")
+
+            if not issue_id:
+                return [TextContent(type="text", text="❌ Error: issue_id is required")]
+
+            try:
+                issue = client.get_issue_details(issue_id)
+                
+                output = f"""🐛 Issue Details
+
+Title: {issue.get('title', 'Unknown')}
+ID: {issue.get('id', 'N/A')}
+Status: {issue.get('status', 'unknown')}
+Level: {issue.get('level', 'unknown')}
+Type: {issue.get('type', 'unknown')}
+
+📊 Statistics:
+- Total Events: {issue.get('count', 0)}
+- Unique Users Affected: {issue.get('userCount', 0)}
+- First Seen: {issue.get('firstSeen', 'N/A')}
+- Last Seen: {issue.get('lastSeen', 'N/A')}
+
+📍 Metadata:
+- Project: {issue.get('project', {}).get('name', 'N/A')}
+- Platform: {issue.get('platform', 'N/A')}
+- Culprit: {issue.get('culprit', 'N/A')}
+
+"""
+                
+                # Add tags if available
+                if issue.get('tags'):
+                    output += "🏷️  Tags:\n"
+                    for tag in issue['tags'][:10]:
+                        output += f"   - {tag.get('key')}: {tag.get('value')}\n"
+                    output += "\n"
+                
+                # Add latest event details if available
+                if issue.get('latestEventDetails'):
+                    event = issue['latestEventDetails']
+                    output += f"""📋 Latest Event:
+Event ID: {event.get('eventID', 'N/A')}
+Timestamp: {event.get('dateCreated', 'N/A')}
+
+"""
+                    
+                    # Add stack trace from entries
+                    entries = event.get('entries', [])
+                    exception_found = False
+                    
+                    for entry in entries:
+                        if entry.get('type') == 'exception':
+                            exception_found = True
+                            output += "🔍 Exception Details:\n\n"
+                            values = entry.get('data', {}).get('values', [])
+                            
+                            for idx, exc in enumerate(values, 1):
+                                if idx > 1:
+                                    output += "\n" + "─" * 60 + "\n\n"
+                                
+                                output += f"Exception #{idx}:\n"
+                                output += f"   Type: {exc.get('type', 'Unknown')}\n"
+                                output += f"   Value: {exc.get('value', 'N/A')}\n"
+                                
+                                # Show mechanism if available
+                                mechanism = exc.get('mechanism', {})
+                                if mechanism:
+                                    output += f"   Handled: {mechanism.get('handled', 'N/A')}\n"
+                                
+                                # Show stack trace
+                                stacktrace = exc.get('stacktrace', {})
+                                frames = stacktrace.get('frames', [])
+                                
+                                if frames:
+                                    output += f"\n   📚 Stack Trace ({len(frames)} frames):\n"
+                                    # Show last 5 frames (most relevant)
+                                    for frame in frames[-5:]:
+                                        filename = frame.get('filename', 'unknown')
+                                        function = frame.get('function', 'unknown')
+                                        lineno = frame.get('lineNo', 'N/A')
+                                        in_app = frame.get('inApp', False)
+                                        
+                                        # Mark in-app frames
+                                        marker = "→" if in_app else " "
+                                        output += f"   {marker}  {filename}:{lineno}\n"
+                                        output += f"      in {function}()\n"
+                                        
+                                        # Show code context if available
+                                        context = frame.get('context', [])
+                                        if context and in_app:
+                                            output += "      Code:\n"
+                                            for line_no, line_code in context[-3:]:  # Last 3 lines
+                                                prefix = ">>>" if line_no == lineno else "   "
+                                                output += f"      {prefix} {line_no}: {line_code}\n"
+                                        output += "\n"
+                                
+                                output += "\n"
+                    
+                    if not exception_found:
+                        output += "ℹ️  No exception details available in latest event\n\n"
+                
+                output += f"\n🔗 View in Sentry: {issue.get('permalink', 'N/A')}\n"
+                
+                return [TextContent(type="text", text=output)]
+                
+            except Exception as e:
+                return [TextContent(type="text", text=f"❌ Error fetching issue details: {str(e)}")]
 
         elif name == "analyze_route_performance":
             route = arguments.get("route")

@@ -142,6 +142,94 @@ class SentryClient:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to fetch issues: {e}")
 
+    def get_issue_details(self, issue_id: str) -> Dict[str, Any]:
+        """Get detailed information about a specific issue including events and stack traces"""
+        # Try organization-level endpoint first
+        url = f"{self.base_url}/api/0/organizations/{self.org}/issues/{issue_id}/"
+
+        try:
+            logger.info(f"Fetching issue details from: {url}")
+            response = self.session.get(url, headers=self.headers, timeout=30, verify=False)
+            response.raise_for_status()
+            issue_data = response.json()
+            logger.debug(f"Issue data keys: {list(issue_data.keys())}")
+            
+            # Try multiple ways to get the latest event ID
+            latest_event_id = None
+            
+            # Method 1: Check lastEvent field (string ID)
+            if isinstance(issue_data.get("lastEvent"), str):
+                latest_event_id = issue_data.get("lastEvent")
+                logger.info(f"Found event ID from lastEvent string: {latest_event_id}")
+            
+            # Method 2: Check lastEvent as dict
+            elif isinstance(issue_data.get("lastEvent"), dict):
+                latest_event_id = issue_data.get("lastEvent", {}).get("id") or issue_data.get("lastEvent", {}).get("eventID")
+                logger.info(f"Found event ID from lastEvent dict: {latest_event_id}")
+            
+            # Method 3: Check latestEvent field
+            if not latest_event_id and issue_data.get("latestEvent"):
+                if isinstance(issue_data.get("latestEvent"), str):
+                    latest_event_id = issue_data.get("latestEvent")
+                else:
+                    latest_event_id = issue_data.get("latestEvent", {}).get("id") or issue_data.get("latestEvent", {}).get("eventID")
+                logger.info(f"Found event ID from latestEvent: {latest_event_id}")
+            
+            # Method 4: Fetch latest event from events endpoint
+            if not latest_event_id:
+                logger.info("No event ID found in issue data, fetching from events endpoint")
+                events_url = f"{self.base_url}/api/0/organizations/{self.org}/issues/{issue_id}/events/"
+                events_response = self.session.get(events_url, headers=self.headers, params={"per_page": 1}, timeout=30, verify=False)
+                if events_response.status_code == 200:
+                    events = events_response.json()
+                    if events and len(events) > 0:
+                        latest_event_id = events[0].get("id") or events[0].get("eventID")
+                        logger.info(f"Found event ID from events endpoint: {latest_event_id}")
+            
+            # Fetch detailed event data if we have an event ID
+            if latest_event_id:
+                logger.info(f"Fetching latest event details: {latest_event_id}")
+                event_url = f"{self.base_url}/api/0/organizations/{self.org}/events/{self.project_slug}:{latest_event_id}/"
+                try:
+                    event_response = self.session.get(event_url, headers=self.headers, timeout=30, verify=False)
+                    event_response.raise_for_status()
+                    event_data = event_response.json()
+                    issue_data["latestEventDetails"] = event_data
+                    logger.info("Successfully fetched event details")
+                except requests.exceptions.RequestException as event_error:
+                    logger.warning(f"Failed to fetch event details: {event_error}")
+                    # Try project-level endpoint as fallback
+                    try:
+                        event_url = f"{self.base_url}/api/0/projects/{self.org}/{self.project_slug}/events/{latest_event_id}/"
+                        logger.info(f"Trying fallback event URL: {event_url}")
+                        event_response = self.session.get(event_url, headers=self.headers, timeout=30, verify=False)
+                        event_response.raise_for_status()
+                        event_data = event_response.json()
+                        issue_data["latestEventDetails"] = event_data
+                        logger.info("Successfully fetched event details from fallback")
+                    except Exception as fallback_error:
+                        logger.warning(f"Fallback also failed: {fallback_error}")
+            else:
+                logger.warning("Could not find latest event ID for issue")
+            
+            return issue_data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to fetch issue details: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response text: {e.response.text[:500]}")
+            
+            # Try fallback to project-level endpoint
+            try:
+                url = f"{self.base_url}/api/0/projects/{self.org}/{self.project_slug}/issues/{issue_id}/"
+                logger.info(f"Trying fallback issue URL: {url}")
+                response = self.session.get(url, headers=self.headers, timeout=30, verify=False)
+                response.raise_for_status()
+                return response.json()
+            except Exception as fallback_error:
+                logger.error(f"Fallback failed: {fallback_error}")
+                raise Exception(f"Failed to fetch issue details: {e}")
+
     def analyze_slow_transactions(
         self, threshold_ms: int = 2000, period: str = "24h"
     ) -> Dict[str, Any]:
