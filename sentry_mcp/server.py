@@ -409,7 +409,53 @@ Timestamp: {event.get('dateCreated', 'N/A')}
                     
                     if not exception_found:
                         output += "ℹ️  No exception details available in latest event\n\n"
-                
+
+                    # Add breadcrumbs
+                    breadcrumbs_found = False
+                    for entry in entries:
+                        if entry.get('type') == 'breadcrumbs':
+                            breadcrumbs_found = True
+                            output += "🍞 Breadcrumbs:\n\n"
+                            breadcrumbs_data = entry.get('data', {}).get('values', [])
+
+                            # Show last 3 breadcrumbs (most relevant)
+                            for crumb in breadcrumbs_data[-3:]:
+                                timestamp = crumb.get('timestamp', '')
+                                # Format timestamp if it's a full ISO format
+                                if timestamp and 'T' in str(timestamp):
+                                    timestamp = str(timestamp).split('T')[1][:8]  # Get time part only
+
+                                category = crumb.get('category', 'default')
+                                level = crumb.get('level', 'info')
+                                message = crumb.get('message', '')
+
+                                # Level indicator
+                                level_icon = {
+                                    'error': '❌',
+                                    'warning': '⚠️',
+                                    'info': 'ℹ️',
+                                    'debug': '🔍',
+                                }.get(level, '•')
+
+                                output += f"   {level_icon} [{timestamp}] [{category}]"
+
+                                if message:
+                                    output += f" {message}"
+
+                                output += "\n"
+
+                                # Show data if available
+                                data = crumb.get('data', {})
+                                if data:
+                                    for key, value in data.items():
+                                        output += f"      {key}: {value}\n"
+
+                            output += "\n"
+                            break
+
+                    if not breadcrumbs_found:
+                        output += "ℹ️  No breadcrumbs available in latest event\n\n"
+
                 output += f"\n🔗 View in Sentry: {issue.get('permalink', 'N/A')}\n"
                 
                 return [TextContent(type="text", text=output)]
